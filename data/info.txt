@@ -1,0 +1,7 @@
+data directory hierarchy:
+
+/data
+    /saved
+    /scrape
+    /temp
+    /work
