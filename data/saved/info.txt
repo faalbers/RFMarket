@@ -1,0 +1,7 @@
+Market Identifier Codes (MIC):
+https://www.iso20022.org/market-identifier-codes
+file: ISO10383_MIC.csv
+
+Country codes:
+https://datahub.io/core/country-list
+file: ISO3166-1.csv
