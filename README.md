@@ -6,3 +6,4 @@ Financial market data retrieval and analyzing code
 
 * pip install pandas
 * pip install requests
+* pip install lxml
