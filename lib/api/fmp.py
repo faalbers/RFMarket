@@ -1,4 +1,5 @@
 import config, requests
+from datetime import datetime
 
 # Financial Modeling Prep API wrapper
 
@@ -16,13 +17,15 @@ class FMP():
     def __init__(self):
         self.__urlMain = 'https://financialmodelingprep.com/api/'
 
-    def getStockList(self):
+    def getStocklist(self):
         result = self.__request('v3/stock/list')
         stockList = {}
         if result == None:
             return result
+        timestamp = int(datetime.now().timestamp())
         for item in result:
             symbol = item['symbol']
             item.pop('symbol')
+            item['timestamp'] = timestamp
             stockList[symbol] = item
         return stockList

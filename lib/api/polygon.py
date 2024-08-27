@@ -1,4 +1,5 @@
 import config, requests
+from datetime import datetime
 from time import sleep
 
 # Polygon API wrapper
@@ -35,12 +36,24 @@ class Polygon():
 
     def getTickers(self):
         result = self.__request('v3/reference/tickers', params={'limit': 1000})
+        tickers = {}
         if result == None:
             return result
-        tickers = {}
+        timestamp = int(datetime.now().timestamp())
         for block in result:
-            for tickerData in block['results']:
-                ticker = tickerData.pop('ticker')
-                tickers[ticker] = tickerData
+            for item in block['results']:
+                ticker = item.pop('ticker')
+                item['timestamp'] = timestamp
+                tickers[ticker] = item
 
         return tickers
+    
+    def getTickerTypes(self):
+        result = self.__request('/v3/reference/tickers/types')
+        data = {}
+        for block in result:
+            for tickerTypeData in block['results']:
+                tickerType = tickerTypeData.pop('code')
+                data[tickerType] = tickerTypeData
+        return data
+    
