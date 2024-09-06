@@ -11,7 +11,7 @@ class FMP():
     def get(self, refresh=False):
         if not refresh:
             # return already scraped data
-            log.info('Retrieve FMP data from storage')
+            log.info('scrape.FMP retrieve data from storage')
             return storage.get(self.__dataPath)
         
         data = {}

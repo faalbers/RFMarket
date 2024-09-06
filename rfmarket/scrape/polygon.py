@@ -8,7 +8,7 @@ class Polygon():
     
     def get(self, refresh=False):
         if not refresh:
-            log.info('Retrieve Polygon data from storage')
+            log.info('scrape.Polygon retrieve data from storage')
             return storage.get(self.__dataPath)
         
         data = {}
