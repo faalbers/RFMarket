@@ -5,12 +5,98 @@ from rfmarket.tools import storage
 from pprint import pp
 from ratelimit import limits, sleep_and_retry
 from time import sleep
-
+from ..tools import log
 
 # Financial Modeling Prep API wrapper
 
 # consts
 class Yahoo():
+    def __requestCall(self, requestArgs):
+        try:
+            response = self.__request.get(**requestArgs)
+        except Exception:
+            log.exception('__requestCall')
+            return None
+
+        return response
+
+    @sleep_and_retry
+    @limits(calls=150, period=60)
+    def __requestCallLimited(self, requestArgs):
+        return self.__requestCall(requestArgs)
+
+    def __testValue(self):
+        requestArgs = {
+            'url': 'https://query2.finance.yahoo.com/v8/finance/chart/BBD',
+            'params': {
+                'range': '5y',
+                'interval': '1d',
+                'events': 'div,splits,capitalGains',
+            },
+            'timeout': 30,
+        }
+        log.debug('**** run test ****')
+        response = self.__requestCallLimited(requestArgs)
+        if response != None:
+            status_code = response.status_code
+            if response.status_code == 200 and response.headers.get('content-type').startswith('application/json'):
+                return len(response.json()['chart']['result'][0]['events']['dividends'])
+        log.debug('test did not return valid value')
+        return None
+    
+    def __multiRequest(self, requestArgsList, blockSize=50, limited=True):
+        data = [None]*len(requestArgsList)
+        retryReqArgsIndices = range(len(requestArgsList))
+        sleepTime = 60
+        # check test value to make sure data is consistent
+        testValue = self.__testValue()
+        if testValue < 65:
+            log.error('Initial test failed: No data returned')
+            return None
+        newTestValue = testValue
+        while len(retryReqArgsIndices) != 0:
+            reqArgsIndices = retryReqArgsIndices
+            retryReqArgsIndices = []
+            lastBlockReqArgsIndices = []
+            reqArgsIndicesCount = len(reqArgsIndices)
+            rangeCount = reqArgsIndicesCount / blockSize
+            for x in range(int(rangeCount) + ((rangeCount) > int(rangeCount))):
+                blockReqArgsIndices = reqArgsIndices[x*blockSize:(x+1)*blockSize]
+                sleepTotal = 0
+                while newTestValue < testValue:
+                    log.debug('Test Failed: wait %s seconds and retry' % sleepTime)
+                    sleepTotal += sleepTime
+                    sleep(sleepTime)
+                    newTestValue = self.__testValue()
+                if sleepTotal > 0:
+                    log.debug('Test OK: Continued after %s seconds total wait' % sleepTotal)
+                    # Turn last blocks data back to None since they might be compromised and retry them later
+                    for noneReqArgsIndex in lastBlockReqArgsIndices:
+                        retryReqArgsIndices.append(noneReqArgsIndex)
+                        data[noneReqArgsIndex] = None
+                lastBlockReqArgsIndices = []
+                statusCodes = {}
+                log.debug('Still %s requests to do ...' % reqArgsIndicesCount)
+                for reqArgsIndex in blockReqArgsIndices:
+                    if limited:
+                        response = self.__requestCallLimited(requestArgsList[reqArgsIndex])
+                    else:
+                        response = self.__requestCall(requestArgsList[reqArgsIndex])
+                    reqArgsIndicesCount -= 1
+                    if not response.status_code in statusCodes:
+                        statusCodes[response.status_code] = 0
+                    statusCodes[response.status_code] += 1
+                    if response.status_code == 200 and response.headers.get('content-type').startswith('application/json'):
+                        data[reqArgsIndex] = response.json()
+                    lastBlockReqArgsIndices.append(reqArgsIndex)
+                for statusCode, scCount in statusCodes.items():
+                    log.debug('got %s requests with status code: %s: %s' % (scCount, statusCode, config.STATUS_CODES[statusCode]['short']))
+                # check test value after each block to make sure data is consistent
+                newTestValue = self.__testValue()
+            if len(retryReqArgsIndices) > 0:
+                log.debug('Retrying %s more requests that did not pass the test ...' % len(retryReqArgsIndices))
+        return data
+
     def __initRequest(self):
         yconfig = storage.get('config/yahoo')
         configRefresh = True
@@ -53,279 +139,185 @@ class Yahoo():
         self.__initRequest()
     
     def getQuoteSummaryModules(self):
-        return config.YAHOO__QUOTE_SUMMARY_MODULES
-    
-    def __getQuoteSummary(self, symbol, modules):
-        requestArgs = {
-            'url': config.YAHOO_URL_MAIN+'v10/finance/quoteSummary/'+symbol.upper(),
-            'params': {
-                'modules': modules,
-                'corsDomain': 'finance.yahoo.com',
-                'formatted': 'false',
-            },
-            'timeout': 30,
-            'proxies': None,
-            }
-        result = self.__request.get(**requestArgs)
-        if result.status_code == 200:
-            # all OK
-            if result.headers.get('content-type').startswith('application/json'):
-                return True, result.json()['quoteSummary']
-        elif result.status_code == 404:
-            # not found
-            return True, result.json()['quoteSummary']
-        elif result.status_code == 500:
-            # server error
-            return True, {'error': {'code': 'Server error: status code 500'}}
-        
-        print('Error: status code: %s' % result.status_code)
-        self.__request.printResponse(verbose=True)
-        return False , [result.status_code, result]
+        return config.YAHOO_QUOTE_SUMMARY_MODULES
 
-    def getQuoteSummary(self, symbols, modules, verbose=False):
-        modules = list(set(modules).intersection(config.YAHOO__QUOTE_SUMMARY_MODULES))
+    def getQuoteSummary(self, symbols, modules):
+        log.info('Running getQuoteSummary on %s symbols' % len(symbols))
+        modules = list(set(modules).intersection(config.YAHOO_QUOTE_SUMMARY_MODULES))
         if len(modules) == 0:
-            print('Yahoo.getQuoteSummary: Error: No valid modules selected. Use Yahoo.getQuoteSummaryModules for valid ones.')
-            return None
+            log.error('Yahoo.getQuoteSummary: No valid modules selected. Use Yahoo.getQuoteSummaryModules for valid ones.')
+            return {}
         modules = ','.join(modules)
-        if isinstance(symbols, str):
-            symbols = [symbols]
-        elif not isinstance(symbols, list):
-            print('Yahoo.getQuoteSummary: Error: Symbol(s) parameter of wrong type.')
-            return None
-        data = {}
-        start = datetime.now()
-        count = 0
+        requestArgsList = []
         for symbol in symbols:
-            symbol = symbol.upper()
+                    requestArgs = {
+                        'url': 'https://query2.finance.yahoo.com/v10/finance/quoteSummary/'+symbol.upper(),
+                        'params': {
+                            'modules': modules,
+                            'corsDomain': 'finance.yahoo.com',
+                            'formatted': 'false',
+                        },
+                        'timeout': 30,
+                    }
+                    requestArgsList.append(requestArgs)
+        responseDataList = self.__multiRequest(requestArgsList, blockSize=100)
+
+        # create user data
+        data = {}
+        if responseDataList == None: return data
+        index = 0
+        for symbol in symbols:
+            symbolData = responseDataList[index]
+            index += 1
+            if symbolData == None:
+                continue
+            symbolData = symbolData['quoteSummary']
+            if symbolData['result'] == None: continue
+            symbolData = symbolData['result'][0]
+            data[symbol] = symbolData
+            data[symbol]['timestamp'] = int(datetime.now().timestamp())
+        
+        return data
+
+    def getChartsTimePeriods():
+        return config.YAHOO_TIME_PERIODS
+
+    def getCharts(self,symbols, range, interval):
+        log.info('Running getCharts with range %s on intervals of %s with %s symbols' % (range, interval, len(symbols)))
+        requestArgsList = []
+        for symbol in symbols:
+                    requestArgs = {
+                        'url': 'https://query2.finance.yahoo.com/v8/finance/chart/'+symbol.upper(),
+                        'params': {
+                            'range': range,
+                            'interval': interval,
+                            'events': 'div,splits,capitalGains',
+                        },
+                        'timeout': 30,
+                    }
+                    requestArgsList.append(requestArgs)
+        responseDataList = self.__multiRequest(requestArgsList, blockSize=50)
+        
+        # create user data
+        data = {}
+        if responseDataList == None: return data
+        indexSymbol = 0
+        for symbol in symbols:
+            symbolData = responseDataList[indexSymbol]
+            indexSymbol += 1
+            if symbolData == None:
+                continue
+            symbolData = symbolData['chart']
+            if symbolData['result'] == None: continue
+            symbolData = symbolData['result'][0]
             data[symbol] = {}
-            if verbose: print('quoteSummary \t%s: %s' % (count, symbol))
-            success, result = self.__getQuoteSummary(symbol, modules)
-            count += 1
-            if success:
-                if 'error' in result and result['error'] != None:
-                    print('Error: %s' % result['error']['code'])
-                    continue
-                elif result['result'] == None:
-                    print('Error: result is None')
-                    continue
-                resultData = result['result'][0]
-                resultData['timestamp'] = int(datetime.now().timestamp())
-                data[symbol] = resultData
-            else:
-                print(symbol)
-                print('something went wrong')
-                print('status code: %s' % result[0])
-                result = result[1]
-                if result.headers.get('content-type').startswith('application/json'):
-                    try:
-                        result = result.json()
-                        pp(result)
-                    except:
-                        print('It sais json type , but I crashed. Trying text')
-                        print(result.text)
-                else:
-                    print(result.text)
-                print('exec time: %s for %s symbols' % (datetime.now()-start, count))
-                return {}
-        print('exec time: %s for %s symbols' % (datetime.now()-start, count))
+            data[symbol]['timestamp'] = int(datetime.now().timestamp())
+            data[symbol]['meta'] = symbolData.pop('meta')
+            if 'timestamp' in symbolData:
+                timestamps = symbolData.pop('timestamp')
+                if 'indicators' in symbolData:
+                    indicators = symbolData.pop('indicators')
+                    data[symbol]['indicators'] = {}
+                    for indicator, indicatorDataList in indicators.items():
+                        data[symbol]['indicators'][indicator] = {}
+                        indexTimestamp = 0
+                        for timestamp in timestamps:
+                            data[symbol]['indicators'][indicator][timestamp] = {}
+                            for indicatorData in indicatorDataList:
+                                for element, elementData in indicatorData.items():
+                                    data[symbol]['indicators'][indicator][timestamp][element] = elementData[indexTimestamp]
+                            indexTimestamp += 1
+            if 'events' in symbolData:
+                events = symbolData.pop('events')
+                data[symbol]['events'] = {}
+                for event, eventData in events.items():
+                    data[symbol]['events'][event] = {}
+                    for key, eventEntry in eventData.items():
+                        data[symbol]['events'][event][eventEntry['date']] = {}
+                        for element, value in eventEntry.items():
+                            if element == 'date': continue
+                            data[symbol]['events'][event][eventEntry['date']][element] = value
+
         return data
-
-    def __testValue(self):
-        requestArgs = {
-            'url': config.YAHOO_URL_MAIN+'v8/finance/chart/BBD',
-            'params': {
-                'range': '5y',
-                'interval': '1d',
-                'events': 'div,splits,capitalGains',
-            },
-            'timeout': 30,
-        }
-        try:
-            print('**** run test ****')
-            response = self.__request.get(**requestArgs)
-        except Exception:
-            exc_type, exc_value, exc_traceback = sys.exc_info()
-            print('%s: %s' % (exc_type, exc_value))
-            return None
-        status_code = response.status_code
-        if response.status_code == 200 and response.headers.get('content-type').startswith('application/json'):
-            return len(response.json()['chart']['result'][0]['events']['dividends'])
-        else:
-            print('test did not return valid value')
-            return None
-
-    @sleep_and_retry
-    @limits(calls=150, period=60)
-    def __requestCall(self, requestArgs):
-        try:
-            response = self.__request.get(**requestArgs)
-        except Exception:
-            exc_type, exc_value, exc_traceback = sys.exc_info()
-            print('Exception: %s: %s' % (exc_type, exc_value))
-            return None
-
-        return response
+    def getFundamentalTypesFinancials(self):
+        return config.YAHOO_FUNDAMENTALS_KEYS['financials']
     
-    def getTestValue(self):
-        return self.__testValue()
+    def getFundamentalTypesBalanceSheet(self):
+        return config.YAHOO_FUNDAMENTALS_KEYS['balance-sheet']
     
-    def getCharts5y(self, symbols):
-        data = {}
-        results = set()
-        blockSize = 50
-        testValue = self.__testValue()
-        sleepTime = 60
-        if testValue > 65:
-            print('Test Failed: Initial test failed')
-            return data
-        symbolCount = len(symbols)
-        rangeCount = symbolCount / blockSize
-        lastBlockSymbols = []
-        for x in range(int(rangeCount) + ((rangeCount) > int(rangeCount))):
-            blockSymbols = symbols[x*blockSize:(x+1)*blockSize]
-            newTestValue = self.__testValue()
-            sleepTotal = 0
-            while newTestValue < testValue:
-                print('Test Failed: wait %s seconds and retry' % sleepTime)
-                sleep(sleepTime)
-                sleepTotal += sleepTime
-                newTestValue = self.__testValue()
-            if sleepTotal > 0:
-                print('Continued after %s seconds wait' % sleepTotal)
-            lastBlockSymbols = []
-            for symbol in blockSymbols:
-                symbol = symbol.upper()
-                requestArgs = {
-                    'url': config.YAHOO_URL_MAIN+'v8/finance/chart/'+symbol,
-                    'params': {
-                        'range': '5y',
-                        'interval': '1d',
-                        'events': 'div,splits,capitalGains',
-                    },
-                    'timeout': 30,
-                }
-                response = self.__requestCall(requestArgs)
-                symbolCount -= 1
-                if response == None:
-                    continue
-                status_code = response.status_code
-                info = '%s: %s: %s' % (status_code, config.STATUS_CODES[status_code]['short'], response.headers.get('content-type'))
-                print('%s: %s -> %s' % (symbol, info, symbolCount))
-                results.add(info)
-                if response.status_code == 200 and response.headers.get('content-type').startswith('application/json'):
-                    responseData = response.json()['chart']
-                    if responseData['result'] == None:
-                        print('**** NO DATA ****')
-                        continue
-                    data[symbol] = {}
-                    responseData = responseData['result'][0]
-                    if not 'events' in responseData: continue
-                    events = responseData['events']
-                    if not 'dividends' in events: continue
-                    data[symbol]['dividends'] = {}
-                    lastBlockSymbols.append(symbol)
-                    for timestamp, divData in events['dividends'].items():
-                        data[symbol]['dividends'][divData['date']] = divData['amount']
-                    
-                    # lists
-                    # timestamps = responseData['timestamp']
-                    # high = responseData['indicators']['quote'][0]['high']
-                    # volume = responseData['indicators']['quote'][0]['volume']
-                    # low = responseData['indicators']['quote'][0]['low']
-                    # close = responseData['indicators']['quote'][0]['close']
-                    # open = responseData['indicators']['quote'][0]['open']
-                    # adjclose = responseData['indicators']['adjclose'][0]['adjclose']
-                    # print(len(timestamps))
-                    # print(len(high))
-                    # print(len(volume))
-                    # print(len(low))
-                    # print(len(close))
-                    # print(len(open))
-                    # print(len(adjclose))
+    def getFundamentalTypesCashFlow(self):
+        return config.YAHOO_FUNDAMENTALS_KEYS['cash-flow']
+    
+    def getFundamentals(self,symbols, fundamentalTypes, periodTypes):
+        log.info('Running getFundamentals on %s symbols' % len(symbols))
+        allFundamentalTypes = set(
+            config.YAHOO_FUNDAMENTALS_KEYS['financials']).union(set(
+                config.YAHOO_FUNDAMENTALS_KEYS['balance-sheet'])).union(set(
+                    config.YAHOO_FUNDAMENTALS_KEYS['cash-flow']))
+        fundamentalTypes = list(set(fundamentalTypes).intersection(allFundamentalTypes))
+        periodTypes = list(set(periodTypes).intersection(set(config.YAHOO_FUNDAMENTALS_PERIODTYPES)))
+        if len(fundamentalTypes) == 0:
+            log.error('getFundamentals: no valid fundamental types given')
+            return {}
+        if len(periodTypes) == 0:
+            log.error('getFundamentals: no valid period types given')
+            return {}
+        types = []
+        for periodType in periodTypes:
+            for fundamentalType in fundamentalTypes:
+                types.append(periodType+fundamentalType)
+        types = ','.join(types)
 
-        pp(results)
-        return data
+        (datetime.now()-timedelta(days=365*10)).timestamp()
+        now = datetime.now()
+        period1 = int(datetime(year=now.year-10, month=now.month, day=now.day).timestamp())
+        period2 = int(now.timestamp())
 
-
-    @sleep_and_retry
-    @limits(calls=150, period=60)
-    def __testLimitRate(self, symbol):
-        requestArgs = {
-            'url': config.YAHOO_URL_MAIN+'v8/finance/chart/'+symbol.upper(),
-            'params': {
-                'range': '5y',
-                'interval': '1d',
-                'events': 'div,splits,capitalGains',
-            },
-            'timeout': 30,
-        }
-        try:
-            response = self.__request.get(**requestArgs)
-        except Exception:
-            exc_type, exc_value, exc_traceback = sys.exc_info()
-            print('%s: %s' % (exc_type, exc_value))
-            return None
-
-        return response
-
-    def testLimitRate(self,symbols):
-        data = {}
-        results = set()
-        count = 0
-        blockSize = 50
-        testValue = 0
-
-        response = self.__testLimitRate('BBD')
-        count += 1
-        status_code = response.status_code
-        info = '%s: %s: %s' % (status_code, config.STATUS_CODES[status_code]['short'], response.headers.get('content-type'))
-        print('%s: %s' % ('BBDFRANKA', info))
-        if response.status_code == 200 and response.headers.get('content-type').startswith('application/json'):
-            responseData = response.json()
-            data['BBDFRANKA'] = responseData
-            testValue = len(responseData['chart']['result'][0]['events']['dividends'])
-        results.add(info)
+        requestArgsList = []
+        for symbol in symbols:
+                    requestArgs = {
+                        # 'url': 'https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/'+symbol.upper(),
+                        'url': 'https://query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/'+symbol.upper(),
+                        'params': {
+                            'type': types,
+                            'period1': period1,
+                            'period2': period2,
+                        },
+                        'timeout': 30,
+                    }
+                    requestArgsList.append(requestArgs)
         
-        symbolCount = len(symbols)
-        rangeCount = symbolCount / blockSize
-        for x in range(int(rangeCount) + ((rangeCount) > int(rangeCount))):
-            blockSymbols = symbols[x*blockSize:(x+1)*blockSize]
-            if self.__testValue() < testValue:
-                print('**** test failed ****')
-                break
-            count += 1
-            for symbol in blockSymbols:
-                symbol = symbol.upper()
-                response = self.__testLimitRate(symbol)
-                count += 1
-                if response == None:
-                    continue
-                status_code = response.status_code
-                info = '%s: %s: %s' % (status_code, config.STATUS_CODES[status_code]['short'], response.headers.get('content-type'))
-                print('%s: %s -> %s' % (symbol, info, count))
-                if response.status_code == 200 and response.headers.get('content-type').startswith('application/json'):
-                    data[symbol] = response.json()
-                results.add(info)
-
-        response = self.__testLimitRate('BBD')
-        count += 1
-        status_code = response.status_code
-        info = '%s: %s: %s' % (status_code, config.STATUS_CODES[status_code]['short'], response.headers.get('content-type'))
-        print('%s: %s' % ('BBDFRANKB', info))
-        if response.status_code == 200 and response.headers.get('content-type').startswith('application/json'):
-            data['BBDFRANKB'] = response.json()
-        results.add(info)
+        responseDataList = self.__multiRequest(requestArgsList, blockSize=50)
         
-        print('')
-        pp(results)
-
+        # create user data
+        data = {}
+        if responseDataList == None: return data
+        index = 0
+        for symbol in symbols:
+            symbolData = responseDataList[index]
+            index += 1
+            if symbolData == None:
+                continue
+            symbolData = symbolData['timeseries']
+            if symbolData['error'] != None:
+                log.error('Error: %s' % symbolData['error'])
+            if symbolData['result'] == None: continue
+            for symbolData in symbolData['result']:
+                if not 'timestamp' in symbolData: continue
+                if not symbol in data:
+                    data[symbol] = {'timestamp': int(datetime.now().timestamp()), 'fundamentals': {}}
+                fundamentalsData = data[symbol]['fundamentals']
+                for type in symbolData['meta']['type']:
+                    fundamentalsData[type] = {}
+                    index = 0
+                    for timestamp in symbolData['timestamp']:
+                        fundamentalsData[type][timestamp] = symbolData[type][index]
+                        index += 1
         return data
-
-
+    
     def search(self, symbol):
         requestArgs = {
-            'url': config.YAHOO_URL_MAIN+'v1/finance/search',
+            'url': 'https://query2.finance.yahoo.com/v1/finance/search',
             'params': {
                 'q': symbol.upper(),
                 'corsDomain': 'finance.yahoo.com',
