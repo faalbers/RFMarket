@@ -27,6 +27,10 @@ def exception(message):
     if 'rfmarket' in logging.root.manager.loggerDict:
         logging.getLogger('rfmarket').exception(message)
 
+def error(message):
+    if 'rfmarket' in logging.root.manager.loggerDict:
+        logging.getLogger('rfmarket').error(message)
+
     
 def indent_decorator(func):
     @wraps(func)
