@@ -253,11 +253,10 @@ STATUS_CODES = {
 }
 
 # yahoo API data
-YAHOO_URL_MAIN   = 'https://query2.finance.yahoo.com/'
 YAHOO_ROOT_URL   = 'https://finance.yahoo.com'
 YAHOO_DOMAIN     = 'finance.yahoo.com'
 YAHOO_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/39.0.2171.95 Safari/537.36'
-YAHOO__QUOTE_SUMMARY_MODULES = {
+YAHOO_QUOTE_SUMMARY_MODULES = {
     'summaryProfile': 'contains general information about the company',
     'summaryDetail': 'prices + volume + market cap + etc',
     'assetProfile': 'summaryProfile + company officers',
@@ -292,8 +291,9 @@ YAHOO__QUOTE_SUMMARY_MODULES = {
     'recommendationTrend': '',
     'futuresChain': '',
 }
-# add 'annual' or 'quarterly' in front of keys
-_FUNDAMENTALS_KEYS_ = {
+
+YAHOO_FUNDAMENTALS_PERIODTYPES = ['trailing', 'quarterly', 'annual']
+YAHOO_FUNDAMENTALS_KEYS = {
     'financials': ["TaxEffectOfUnusualItems", "TaxRateForCalcs", "NormalizedEBITDA", "NormalizedDilutedEPS",
                    "NormalizedBasicEPS", "TotalUnusualItems", "TotalUnusualItemsExcludingGoodwill",
                    "NetIncomeFromContinuingOperationNetMinorityInterest", "ReconciledDepreciation",
@@ -410,3 +410,4 @@ _FUNDAMENTALS_KEYS_ = {
                   "PaymentstoSuppliersforGoodsandServices", "ClassesofCashReceiptsfromOperatingActivities",
                   "OtherCashReceiptsfromOperatingActivities", "ReceiptsfromGovernmentGrants", "ReceiptsfromCustomers"]}
 
+YAHOO_TIME_PERIODS = ['1d', '5d', '1mo', '3mo', '6mo', '1y', '2y', '5y', '10y', 'ytd', 'max']
